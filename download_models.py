@@ -6,7 +6,7 @@ This bakes models into the image for faster cold starts.
 import os
 from huggingface_hub import hf_hub_download, snapshot_download
 
-MODEL_DIR = "/app/models"
+MODEL_DIR = os.environ.get("MODEL_DIR", "/runpod-volume/models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 REPO_ID = "Lightricks/LTX-2.3"

@@ -16,15 +16,14 @@ RUN git clone https://github.com/Lightricks/LTX-2.git /app/ltx2 && \
     cd /app/ltx2 && \
     pip install --no-cache-dir -e .
 
-# Copy handler
+# Copy handler and model downloader
 COPY handler.py .
-
-# Download models at build time (baked into image for fast cold starts)
-# Comment this out if using RunPod network volume or model caching instead
 COPY download_models.py .
-RUN python download_models.py
+COPY start.sh .
+RUN chmod +x start.sh
 
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-ENV MODEL_DIR=/app/models
+ENV MODEL_DIR=/runpod-volume/models
+ENV DOWNLOAD_MODELS_ON_START=true
 
-CMD ["python", "-u", "/app/handler.py"]
+CMD ["/app/start.sh"]
