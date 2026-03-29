@@ -7,16 +7,22 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg git && \
     rm -rf /var/lib/apt/lists/*
 
+# Install uv package manager
+RUN pip install --no-cache-dir uv
+
 # Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install LTX-2 packages from source (uses uv build system)
-RUN pip install --no-cache-dir uv_build && \
-    git clone https://github.com/Lightricks/LTX-2.git /app/ltx2 && \
+# Clone LTX-2 and install via uv sync (handles circular deps in workspace)
+RUN git clone https://github.com/Lightricks/LTX-2.git /app/ltx2 && \
     cd /app/ltx2 && \
-    pip install --no-cache-dir ./packages/ltx-core && \
-    pip install --no-cache-dir ./packages/ltx-pipelines
+    uv sync --frozen && \
+    # Make the venv packages accessible to the system python
+    cp -r .venv/lib/python3.11/site-packages/ltx_core /usr/local/lib/python3.11/dist-packages/ && \
+    cp -r .venv/lib/python3.11/site-packages/ltx_pipelines /usr/local/lib/python3.11/dist-packages/ && \
+    # Copy any other installed deps not already present
+    cp -rn .venv/lib/python3.11/site-packages/* /usr/local/lib/python3.11/dist-packages/ 2>/dev/null || true
 
 # Copy handler and model downloader
 COPY handler.py .
