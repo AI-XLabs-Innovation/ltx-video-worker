@@ -11,10 +11,12 @@ RUN apt-get update && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install LTX-2 from source
-RUN git clone https://github.com/Lightricks/LTX-2.git /app/ltx2 && \
+# Install LTX-2 packages from source (uses uv build system)
+RUN pip install --no-cache-dir uv_build && \
+    git clone https://github.com/Lightricks/LTX-2.git /app/ltx2 && \
     cd /app/ltx2 && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir ./packages/ltx-core && \
+    pip install --no-cache-dir ./packages/ltx-pipelines
 
 # Copy handler and model downloader
 COPY handler.py .
