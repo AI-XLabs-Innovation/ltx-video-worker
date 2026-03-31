@@ -1,6 +1,7 @@
 """
 RunPod Serverless Handler for LTX Video 2.3 (FP8)
 Generates videos from text/image prompts using Lightricks LTX-2.3
+Supports: text-to-video, image-to-video, first+last frame interpolation
 """
 
 import os
@@ -8,6 +9,7 @@ import uuid
 import base64
 import tempfile
 import time
+import requests
 import runpod
 import torch
 import boto3
@@ -35,6 +37,7 @@ start_time = time.time()
 from ltx_core.quantization import QuantizationPolicy
 from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
 from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
+from ltx_pipelines.utils.args import ImageConditioningInput
 from ltx_core.components.guiders import MultiModalGuiderParams
 
 # Distilled LoRA for faster inference
@@ -93,6 +96,26 @@ def upload_to_storage(file_path: str) -> str:
 
 
 # ============================================================
+# IMAGE DOWNLOAD HELPER
+# ============================================================
+
+def download_image(url: str) -> str:
+    """Download an image URL to a temp file and return the path."""
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    ext = ".jpg"
+    ct = resp.headers.get("content-type", "")
+    if "png" in ct:
+        ext = ".png"
+    elif "webp" in ct:
+        ext = ".webp"
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    tmp.write(resp.content)
+    tmp.close()
+    return tmp.name
+
+
+# ============================================================
 # VALIDATION
 # ============================================================
 
@@ -118,7 +141,13 @@ def validate_input(job_input: dict) -> str | None:
 # ============================================================
 
 def handler(job):
-    """Process a video generation request."""
+    """Process a video generation request.
+
+    Supports three modes based on input fields:
+      - Text-to-video: only 'prompt' provided
+      - Image-to-video: 'image' URL provided (conditioned on first frame)
+      - First+last frame interpolation: 'image' + 'last_image' URLs provided
+    """
     job_input = job["input"]
 
     # Validate
@@ -137,6 +166,11 @@ def handler(job):
     frame_rate = job_input.get("frame_rate", 25.0)
     guidance_scale = job_input.get("guidance_scale", 3.0)
     stg_scale = job_input.get("stg_scale", 1.0)
+    image_strength = job_input.get("image_strength", 1.0)
+
+    # Image conditioning URLs (optional)
+    image_url = job_input.get("image")           # first frame / I2V
+    last_image_url = job_input.get("last_image")  # last frame for interpolation
 
     # Random seed if -1
     if seed == -1:
@@ -160,11 +194,47 @@ def handler(job):
         stg_blocks=[29],
     )
 
-    # Generate
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-        output_path = tmp.name
+    # Build image conditioning list
+    image_conditions = []
+    downloaded_files = []
 
     try:
+        if image_url:
+            print(f"📥 Downloading first-frame image: {image_url[:80]}...")
+            first_path = download_image(image_url)
+            downloaded_files.append(first_path)
+            image_conditions.append(
+                ImageConditioningInput(
+                    path=first_path,
+                    frame_idx=0,
+                    strength=image_strength,
+                )
+            )
+
+        if last_image_url:
+            print(f"📥 Downloading last-frame image: {last_image_url[:80]}...")
+            last_path = download_image(last_image_url)
+            downloaded_files.append(last_path)
+            last_frame_idx = num_frames - 1
+            image_conditions.append(
+                ImageConditioningInput(
+                    path=last_path,
+                    frame_idx=last_frame_idx,
+                    strength=image_strength,
+                )
+            )
+
+        mode = "t2v"
+        if image_url and last_image_url:
+            mode = "keyframe"
+        elif image_url:
+            mode = "i2v"
+        print(f"🎬 Mode: {mode} | {width}x{height} | {num_frames} frames @ {frame_rate}fps")
+
+        # Generate
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            output_path = tmp.name
+
         gen_start = time.time()
 
         pipeline(
@@ -179,6 +249,7 @@ def handler(job):
             num_inference_steps=num_inference_steps,
             video_guider_params=video_guider_params,
             audio_guider_params=audio_guider_params,
+            images=image_conditions,
         )
 
         gen_time = time.time() - gen_start
@@ -191,6 +262,7 @@ def handler(job):
             "height": height,
             "num_frames": num_frames,
             "frame_rate": frame_rate,
+            "mode": mode,
         }
 
         # Upload to S3/R2 if configured
@@ -205,7 +277,11 @@ def handler(job):
         return result
 
     finally:
-        if os.path.exists(output_path):
+        # Clean up downloaded images and output
+        for f in downloaded_files:
+            if os.path.exists(f):
+                os.unlink(f)
+        if 'output_path' in locals() and os.path.exists(output_path):
             os.unlink(output_path)
 
 
