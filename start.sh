@@ -1,12 +1,15 @@
 #!/bin/bash
 set -e
 
-# Use the LTX-2 venv which has ltx_core and ltx_pipelines installed
+# Use the LTX-2 venv which has ltx_core, ltx_pipelines, and runpod installed
 export VIRTUAL_ENV=/app/ltx2/.venv
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install runpod + boto3 into the venv if not already present
-pip install --quiet runpod boto3 2>/dev/null || true
+# Verify runpod is importable
+python -c "import runpod; print(f'✅ runpod {runpod.__version__} available')" || {
+    echo "⚠️ runpod not found in venv, installing..."
+    cd /app/ltx2 && uv pip install runpod boto3 requests fastapi uvicorn
+}
 
 # Download models on first start if not already present
 if [ "$DOWNLOAD_MODELS_ON_START" = "true" ]; then
@@ -19,5 +22,5 @@ if [ "$DOWNLOAD_MODELS_ON_START" = "true" ]; then
     fi
 fi
 
-echo "🚀 Starting RunPod handler..."
+echo "🚀 Starting LTX worker (mode: ${RUNPOD_MODE:-serverless})..."
 exec python -u /app/handler.py

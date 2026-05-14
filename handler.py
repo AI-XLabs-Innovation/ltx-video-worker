@@ -1,7 +1,11 @@
 """
-RunPod Serverless Handler for LTX Video 2.3 (FP8)
+RunPod Serverless + HTTP Batch Handler for LTX Video 2.3 (FP8)
 Generates videos from text/image prompts using Lightricks LTX-2.3
 Supports: text-to-video, image-to-video, first+last frame interpolation
+
+Modes:
+  - RunPod Serverless: RUNPOD_MODE=serverless (default)
+  - HTTP Batch Server: RUNPOD_MODE=http (for dedicated GPU pods)
 """
 
 import os
@@ -10,7 +14,6 @@ import base64
 import tempfile
 import time
 import requests
-import runpod
 import torch
 import boto3
 from botocore.config import Config as BotoConfig
@@ -26,6 +29,8 @@ S3_REGION = os.environ.get("S3_REGION", "auto")
 S3_PUBLIC_URL = os.environ.get("S3_PUBLIC_URL", "")  # CDN/public URL prefix
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+RUNPOD_MODE = os.environ.get("RUNPOD_MODE", "serverless")  # "serverless" or "http"
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
 
 # ============================================================
 # MODEL LOADING (runs once at worker startup)
@@ -137,19 +142,11 @@ def validate_input(job_input: dict) -> str | None:
 
 
 # ============================================================
-# HANDLER
+# CORE GENERATION (shared by both modes)
 # ============================================================
 
-def handler(job):
-    """Process a video generation request.
-
-    Supports three modes based on input fields:
-      - Text-to-video: only 'prompt' provided
-      - Image-to-video: 'image' URL provided (conditioned on first frame)
-      - First+last frame interpolation: 'image' + 'last_image' URLs provided
-    """
-    job_input = job["input"]
-
+def generate_video(job_input: dict) -> dict:
+    """Process a video generation request and return result dict."""
     # Validate
     error = validate_input(job_input)
     if error:
@@ -285,4 +282,83 @@ def handler(job):
             os.unlink(output_path)
 
 
-runpod.serverless.start({"handler": handler})
+# ============================================================
+# MODE: RunPod Serverless Handler
+# ============================================================
+
+def handler(job):
+    """RunPod serverless handler."""
+    return generate_video(job["input"])
+
+
+# ============================================================
+# MODE: HTTP Batch Server (for dedicated GPU pods)
+# ============================================================
+
+def start_http_server():
+    """Start a FastAPI HTTP server for batch processing."""
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+    import uvicorn
+
+    app = FastAPI(title="LTX Video 2.3 Batch Server")
+
+    class GenerateRequest(BaseModel):
+        prompt: str
+        negative_prompt: str = "worst quality, inconsistent motion, blurry, jittery, distorted"
+        width: int = 768
+        height: int = 512
+        num_frames: int = 121
+        seed: int = -1
+        num_inference_steps: int = 40
+        frame_rate: float = 25.0
+        guidance_scale: float = 3.0
+        stg_scale: float = 1.0
+        image_strength: float = 1.0
+        image: str | None = None
+        last_image: str | None = None
+        # Batch metadata (passed through, not used by generation)
+        job_id: str | None = None
+        callback_url: str | None = None
+
+    @app.get("/health")
+    def health():
+        return {"status": "ready", "model": "LTX Video 2.3 FP8", "gpu": torch.cuda.get_device_name(0)}
+
+    @app.post("/generate")
+    def generate(req: GenerateRequest):
+        job_input = req.model_dump(exclude_none=True)
+        job_id = job_input.pop("job_id", None)
+        callback_url = job_input.pop("callback_url", None)
+
+        result = generate_video(job_input)
+
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        # Include batch metadata in response
+        if job_id:
+            result["job_id"] = job_id
+
+        # Send callback if configured
+        if callback_url:
+            try:
+                requests.post(callback_url, json={"job_id": job_id, **result}, timeout=30)
+            except Exception as e:
+                result["callback_error"] = str(e)
+
+        return result
+
+    print(f"🌐 Starting HTTP batch server on port {HTTP_PORT}...")
+    uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT)
+
+
+# ============================================================
+# ENTRYPOINT
+# ============================================================
+
+if RUNPOD_MODE == "http":
+    start_http_server()
+else:
+    import runpod
+    runpod.serverless.start({"handler": handler})

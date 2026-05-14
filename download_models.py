@@ -39,12 +39,13 @@ hf_hub_download(
     token=HF_TOKEN,
 )
 
-# Gemma 3 text encoder (gated — requires HF_TOKEN)
-print("📥 Downloading Gemma text encoder...")
+# Gemma 3 12B text encoder (gated — requires HF_TOKEN)
+# LTX 2.3 requires hidden_size=3840 which is gemma-3-12b, NOT gemma-3-4b
+print("📥 Downloading Gemma 3 12B text encoder...")
 if not HF_TOKEN:
     print("⚠️  HF_TOKEN not set — Gemma is a gated model, download may fail")
 snapshot_download(
-    repo_id="google/gemma-3-4b-pt",
+    repo_id="google/gemma-3-12b-pt",
     local_dir=os.path.join(MODEL_DIR, "gemma"),
     ignore_patterns=["*.gguf"],
     token=HF_TOKEN,
